@@ -1,94 +1,61 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using AuthAPI.DATA;
-using AuthAPI.Models;
 using AuthAPI.DTO;
-using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
-using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
-using System.Text;
 using Microsoft.AspNetCore.Authorization;
+using AuthAPI.Services;
+using AuthAPI.Filters;
 namespace AuthAPI.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
     public class AuthController : ControllerBase
     {
-        private readonly AppDbContext _context;
-        private readonly IConfiguration _configuration;
-        public AuthController(AppDbContext context, IConfiguration configuration)
+        private readonly IServices _authService;
+        public AuthController(IServices authService)
         {
-            _context = context;
-            _configuration = configuration;
+            _authService = authService;
         }
+
         [HttpPost("register")]
+        [RateLimit(maxRequest: 3, timeLimit: 10)]
         public async Task<IActionResult> Register(RegisterDto request)
         {
-            // Kiểm tra và lưu vào Database
-            bool checkUpper = _context.Users.Any(u => EF.Functions.Collate(u.Username, "SQL_Latin1_General_CP1_CS_AS") == request.Username);
-            if (checkUpper)
-            {
-                return BadRequest("Tên tài khoản đã tồn tại");
-            }
-            string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
-            var user = new User()
-            {
-                Username = request.Username,
-                Password = passwordHash
-            };
-            _context.Users.Add(user);
-            _context.SaveChanges();
+            var result = await _authService.RegisterAsync(request);
+            if (result != "Success") return BadRequest(result);
+
             return Ok("Đăng ký thành công");
         }
+
         [HttpPost("login")]
+        [RateLimit(maxRequest: 5, timeLimit: 60)]
         public async Task<IActionResult> Login(LoginDto request)
         {
-            // Đối chiếu trong Database
-            var user = _context.Users.FirstOrDefault(u => EF.Functions.Collate(u.Username, "SQL_Latin1_General_CP1_CS_AS") == request.Username);
-            if (user == null)
-            {
-                return BadRequest("Sai tên tài khoản hoặc mật khẩu");
-            }
+            var (tokens, error) = await _authService.LoginAsync(request);
+            if (tokens == null) return BadRequest(error);
 
-            if (!BCrypt.Net.BCrypt.Verify(request.Password, user.Password))
-            {
-                return BadRequest("Sai tài khoản hoặc mật khẩu");
-            }
-            // Tạo token
-            string token = CreateToken(user);
-            // In token ra màn hình
-            return Ok(new
-            {
-                Message = "Đăng nhập thành công",
-                Token = token
-            });
+            return Ok(tokens);
         }
-        // Hàm tạo token
-        private string CreateToken(User user)
+
+        [HttpPost("refresh-token")]
+        public async Task<IActionResult> RefreshToken(TokenDto request)
         {
-            var claims = new List<Claim>
-            {
-                new Claim(ClaimTypes.Name, user.Username)
-            };
+            var (tokens, error) = await _authService.RefreshTokenAsync(request);
+            if (tokens == null) return BadRequest(error);
 
-            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!));
-            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-            var token = new JwtSecurityToken(
-                issuer: _configuration["Jwt:Issuer"],
-                audience: _configuration["Jwt:Audience"],
-                claims: claims,
-                expires: DateTime.Now.AddDays(1),
-                signingCredentials: creds
-            );
-            var jwt = new JwtSecurityTokenHandler().WriteToken(token);
-            return jwt;
+            return Ok(tokens);
         }
+
         [HttpGet("profile")]
         [Authorize]
         public IActionResult Profile()
         {
             return Ok("Xác thực thành công");
+        }
+
+        [HttpGet("admin-only")]
+        [Authorize(Roles = "Admin")]
+        public IActionResult OnlyAdminEndpoint()
+        {
+            return Ok(new { message = "Bạn đã vào quyền Admin" });
         }
     }
 }
